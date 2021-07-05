@@ -150,6 +150,34 @@ fn main() {
     println!("[{:?}] clustered lines ({})", time.elapsed(), clustered_points.len());
     time = Instant::now();
 
+    let mut intersections = vec![];
+    for i1 in 0..clustered_points.len() {
+        let p1 = clustered_points[i1];
+        for i2 in i1 + 1 .. clustered_points.len() {
+            let p2 = clustered_points[i2];
+            // find intersection
+            let a1 = p1.0 / (p1.2 as f64) * 2.0 * std::f64::consts::PI / angles as f64;
+            let a2 = p2.0 / (p2.2 as f64) * 2.0 * std::f64::consts::PI / angles as f64;
+            let r1 = p1.1 / p1.2 as f64;
+            let r2 = p2.1 / p2.2 as f64;
+            let ct1 = a1.cos();
+            let ct2 = a2.cos();
+            let st1 = a1.sin();
+            let st2 = a2.sin();
+            let det = ct1 * st2 - st1 * ct2;
+            if det != 0.0 {
+                let x3 = (st2 * (r1 * diagonal / rhos as f64) - st1 * (r2 * diagonal / rhos as f64)) / det;
+                let y3 = (-ct2 * (r1 * diagonal / rhos as f64) + ct1 * (r2 * diagonal / rhos as f64)) / det;
+
+                if 0.0 <= x3 && x3 < width as f64 && 0.0 <= y3 && y3 < height as f64 {
+                    intersections.push((x3 as u32, y3 as u32));
+                }
+            }
+        }
+    }
+
+    println!("[{:?}] found intersections ({})", time.elapsed(), intersections.len());
+    time = Instant::now();
 
     let mut lines_image = downscaled.clone();
     for (a_s, r_s, c) in clustered_points.iter() {
@@ -164,10 +192,16 @@ fn main() {
             let x = r2 * d2.cos();
             let y = r2 * d2.sin();
 
-            //println!("r2 d2: {} {}, x y: {} {}", r2, d2, x, y);
-
             if 0.0 <= x && x < width as f64 && 0.0 <= y && y < height as f64 {
                 lines_image.put_pixel(x as u32, y as u32, image::Rgba([255, 0, 255, 255]));
+            }
+        }
+    }
+
+    for i in intersections.iter() {
+        for dx in -5 .. 5 {
+            for dy in -5 .. 5 {
+                lines_image.put_pixel((i.0 as i32 + dx) as u32, (i.1 as i32 + dy) as u32, image::Rgba([255, 255, 0, 255]));
             }
         }
     }
