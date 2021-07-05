@@ -1,0 +1,11 @@
+[package]
+name = "detection"
+version = "0.1.0"
+authors = ["Hugo Peixoto <hugo.peixoto@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+edge-detection = "0.2.5"
+image = "0.23"
