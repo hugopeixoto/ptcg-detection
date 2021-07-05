@@ -2,7 +2,6 @@ use image::Luma;
 use image::GenericImage;
 use image::GenericImageView;
 use std::time::Instant;
-//use superpixel::{LABColor,rgb_to_lab_image,do_segmentation_with_num_superpixels,save_image_with_segment_boundaries};
 
 fn main() {
     println!("started");
@@ -21,7 +20,6 @@ fn main() {
 
     let width = downscaled.width();
     let height = downscaled.height();
-
     let diagonal = ((width*width + height*height) as f64).sqrt().ceil();
 
     let detection = edge_detection::canny(
@@ -89,15 +87,14 @@ fn main() {
         trigs.push((theta.cos(), theta.sin()));
     }
 
-    for x in 0..detection.width() {
-        for y in 0..detection.height() {
-            let magnitude = sobel[(x*height as usize + y) as usize];
+    for x in 0..width {
+        for y in 0..height {
+            let magnitude = sobel[(x * height + y) as usize];
             if magnitude == 255 {
                 for a in 0..angles {
                     let rho = x as f64 * trigs[a].0 + y as f64 * trigs[a].1;
                     if rho >= 0.0 {
                         let r = (rho * rhos as f64 / diagonal) as usize; // r/rho = 400 / ? => r = 400 / ? * rho
-                        //println!("{}x{}: {}, {} :{}, {} ({})", x, y, theta, rho, a, r, rho * 400.0 / 600.0);
                         hough[a * rhos + r] += magnitude as u32; //as u32 * 100;
                     }
                 }
@@ -136,13 +133,33 @@ fn main() {
     println!("[{:?}] saved hough transform", time.elapsed());
     time = Instant::now();
 
+    let mut clustered_points: Vec<(f64, f64, usize)> = vec![];
+    for point in points.iter() {
+        let dup = clustered_points.iter().position(|p| ((p.0/p.2 as f64) - point.0 as f64).abs() < 5.0 && ((p.1/p.2 as f64) - point.1 as f64).abs() < 5.0);
+        match dup {
+            None => {
+                clustered_points.push((point.0 as f64, point.1 as f64, 1));
+            },
+            Some(index) => {
+                let (p, r, c) = clustered_points[index];
+                clustered_points[index] = (p + point.0 as f64, r + point.1 as f64, c + 1);
+            }
+        }
+    }
+
+    println!("[{:?}] clustered lines ({})", time.elapsed(), clustered_points.len());
+    time = Instant::now();
+
+
     let mut lines_image = downscaled.clone();
-    for (a, r_h) in points.iter() {
+    for (a_s, r_s, c) in clustered_points.iter() {
+        let a = a_s / *c as f64;
+        let r_h = r_s / *c as f64;
         for d_abs in 0..=(20*diagonal as usize) {
             let d = (d_abs as f64 / 10.0) - diagonal;
-            let r = *r_h as f64 * diagonal / rhos as f64;
-            let r2 = ((r*r) as f64 + d*d).sqrt();
-            let d2 = (*a as f64 * 2.0 * std::f64::consts::PI / angles as f64) - (d / r2).asin();
+            let r = r_h * diagonal / rhos as f64;
+            let r2 = (r*r + d*d).sqrt();
+            let d2 = (a as f64 * 2.0 * std::f64::consts::PI / angles as f64) - (d / r2).asin();
 
             let x = r2 * d2.cos();
             let y = r2 * d2.sin();
