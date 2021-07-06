@@ -1,14 +1,16 @@
 use image::Luma;
+use image::Rgba;
 use image::GenericImage;
 use image::GenericImageView;
 use std::time::Instant;
 
-fn main() {
-    println!("started");
+fn process(filename: &std::path::PathBuf, dataset: &mut Vec<(img_hash::ImageHash, image::DynamicImage, std::path::PathBuf)>) {
+    let stem = filename.file_stem().unwrap().to_str().unwrap();
+    println!(":::::::::::::::::::::::::::::: started {}", stem);
+
     let mut time = Instant::now();
 
-    let source_image = image::open("scaled_img_20210705_114314.jpg")
-        .expect("failed to read image");
+    let source_image = image::open(filename).expect("failed to read image");
 
     println!("[{:?}] loaded", time.elapsed());
     time = Instant::now();
@@ -67,16 +69,78 @@ fn main() {
         }
     }
 
-    sobel_image.save("sobel.png").unwrap();
-    downscaled.grayscale().save("grayscale.png").unwrap();
-    detection.as_image().save("result.png").unwrap();
-    detection.as_image().grayscale().save("result-gs.png").unwrap();
+    sobel_image.save(format!("outputs/{}.sobel.png", stem)).unwrap();
+    downscaled.grayscale().save(format!("outputs/{}.grayscale.png", stem)).unwrap();
+
+    let mut canny = image::DynamicImage::new_luma8(width, height).to_luma8();
+    for x in 0..width {
+        for y in 0..height {
+            let mag = (detection[(x as usize,y as usize)].magnitude() * 500.0) as u8;
+            canny.put_pixel(x, y, Luma([mag]));
+        }
+    }
+
+    canny.save(format!("outputs/{}.canny.png", stem)).unwrap();
 
     println!("[{:?}] saved intermediate images", time.elapsed());
     time = Instant::now();
 
-    let angles = 400;
-    let rhos = 400;
+    let mut border = vec![];
+    border.resize((width*height) as usize, 0);
+    let border_threshold = 100;
+    for x in 10..width as usize {
+        for y in 10..height as usize-50 {
+            let magnitude = sobel[x * height as usize + y];
+            if magnitude > border_threshold {
+                border[x * height as usize + y] = 1;
+                break;
+            }
+        }
+        for ry in 50..height as usize {
+            let y = height as usize - 1 - ry;
+            let magnitude = sobel[x * height as usize + y];
+            if magnitude > border_threshold {
+                border[x * height as usize + y] = 1;
+                break;
+            }
+        }
+    }
+    for y in 10..height as usize {
+        for x in 10..width as usize {
+            let magnitude = sobel[(x * height as usize + y) as usize];
+            if magnitude > border_threshold {
+                border[x * height as usize + y] = 1;
+                break;
+            }
+        }
+        for rx in 10..width as usize {
+            let x = width as usize - 1 - rx;
+            let magnitude = sobel[(x * height as usize + y) as usize];
+            if magnitude > border_threshold {
+                border[x * height as usize + y] = 1;
+                break;
+            }
+        }
+    }
+
+    println!("[{:?}] ray casting border", time.elapsed());
+    time = Instant::now();
+
+    let mut border_image = image::DynamicImage::new_rgba8(width, height);
+    for x in 10..width as usize {
+        for y in 10..height as usize -50 {
+            if border[x * height as usize + y] > 0 {
+                border_image.put_pixel(x as u32, y as u32, Rgba([0, 0, 0, 255]));
+            }
+        }
+    }
+
+    border_image.save(format!("outputs/{}.border.png", stem)).unwrap();
+    println!("[{:?}] saved border", time.elapsed());
+    time = Instant::now();
+
+    let angles = 300;
+    let rhos = 300;
 
     let mut hough: Vec<u32> = Vec::new();
     hough.resize(angles * rhos, 0);
@@ -89,8 +153,8 @@ fn main() {
 
     for x in 0..width {
         for y in 0..height {
-            let magnitude = sobel[(x * height + y) as usize];
-            if magnitude == 255 {
+            let magnitude = border[(x * height + y) as usize];
+            if magnitude >= 0 {
                 for a in 0..angles {
                     let rho = x as f64 * trigs[a].0 + y as f64 * trigs[a].1;
                     if rho >= 0.0 {
@@ -108,11 +172,10 @@ fn main() {
     time = Instant::now();
 
     let mut points = vec![];
-
     for a in 0..angles {
         for r in 0..rhos {
-            let x = (hough[a*rhos + r] * 255 / maximum_weight) as u8;
-            if x > 180 {
+            let x = hough[a * rhos + r]; // (hough[a*rhos + r] * 255 / maximum_weight) as u8;
+            if x > 100 {
                 points.push((a, r));
             }
         }
@@ -128,14 +191,14 @@ fn main() {
             hough_image.put_pixel(a as u32, r as u32,  image::Rgba([x, x, x, 255]));
         }
     }
-    hough_image.save("hough.png").unwrap();
+    hough_image.save(format!("outputs/{}.hough.png", stem)).unwrap();
 
     println!("[{:?}] saved hough transform", time.elapsed());
     time = Instant::now();
 
     let mut clustered_points: Vec<(f64, f64, usize)> = vec![];
     for point in points.iter() {
-        let dup = clustered_points.iter().position(|p| ((p.0/p.2 as f64) - point.0 as f64).abs() < 5.0 && ((p.1/p.2 as f64) - point.1 as f64).abs() < 5.0);
+        let dup = clustered_points.iter().position(|p| ((p.0/p.2 as f64) - point.0 as f64).abs() < 20.0 && ((p.1/p.2 as f64) - point.1 as f64).abs() < 50.0);
         match dup {
             None => {
                 clustered_points.push((point.0 as f64, point.1 as f64, 1));
@@ -148,6 +211,7 @@ fn main() {
     }
 
     println!("[{:?}] clustered lines ({})", time.elapsed(), clustered_points.len());
+    println!("{:?}", clustered_points);
     time = Instant::now();
 
     let mut intersections = vec![];
@@ -179,8 +243,78 @@ fn main() {
     println!("[{:?}] found intersections ({})", time.elapsed(), intersections.len());
     time = Instant::now();
 
+    let mut clustered_intersections: Vec<(f64, f64)> = vec![];
+    let mut counts = vec![];
+    for point in intersections.iter() {
+        let dup = clustered_intersections.iter().position(|p| ((p.0 - point.0 as f64).powi(2) + (p.1 - point.1 as f64).powi(2)) < 256.0);
+        match dup {
+            None => {
+                clustered_intersections.push((point.0 as f64, point.1 as f64));
+                counts.push(1);
+            },
+            Some(index) => {
+                let (p, r) = clustered_intersections[index];
+                clustered_intersections[index] = (p + point.0 as f64, r + point.1 as f64);
+                counts[index] += 1;
+            }
+        }
+    }
+
+    for i in 0..counts.len() {
+        clustered_intersections[i].0 = clustered_intersections[i].0 / counts[i] as f64;
+        clustered_intersections[i].1 = clustered_intersections[i].1 / counts[i] as f64;
+    }
+
+    println!("[{:?}] clustered intersections ({})", time.elapsed(), clustered_intersections.len());
+    time = Instant::now();
+
+    let mut redundant = vec![];
+    redundant.resize(clustered_intersections.len(), false);
+    for i in 0..clustered_intersections.len() {
+        let p1 = clustered_intersections[i];
+        for j in i+1..clustered_intersections.len() {
+            let p2 = clustered_intersections[j];
+            for k in j+1..clustered_intersections.len() {
+                let p3 = clustered_intersections[k];
+
+                let area = 0.5 * (p1.0 * (p2.1 - p3.1) + p2.0 * (p3.1 - p1.1) + p3.0 * (p1.1 - p2.1)).abs();
+                if area < 150.0 {
+                    let d12 = (p1.0 - p2.0).powi(2) + (p1.1 - p2.1).powi(2);
+                    let d23 = (p2.0 - p3.0).powi(2) + (p2.1 - p3.1).powi(2);
+                    let d13 = (p1.0 - p3.0).powi(2) + (p1.1 - p3.1).powi(2);
+
+                    if d12 >= d23 && d12 >= d13 { redundant[k] = true; }
+                    if d23 >= d13 && d23 >= d12 { redundant[i] = true; }
+                    if d13 >= d12 && d13 >= d23 { redundant[j] = true; }
+                }
+            }
+        }
+    }
+
+    let mut final_intersections = vec![];
+    for i in 0..clustered_intersections.len() {
+        if !redundant[i] {
+            final_intersections.push(clustered_intersections[i]);
+        }
+    }
+
+    println!("redundant: {:?}", redundant);
+
+    println!("[{:?}] removed parallel intersections ({:?})", time.elapsed(), final_intersections);
+    time = Instant::now();
+
+    let mut ordered_intersections = vec![];
+    for (x, y) in [(0.0, 0.0), (width as f64, 0.0), (0.0, height as f64), (width as f64, height as f64)] {
+        // find closest point to image corner
+        ordered_intersections.push(final_intersections.iter().min_by_key(|(px, py)| ((px - x).powi(2) + (py - y).powi(2)) as u32).unwrap());
+    }
+
+    println!("[{:?}] sorted intersections ({:?})", time.elapsed(), ordered_intersections);
+    time = Instant::now();
+
     let mut lines_image = downscaled.clone();
     for (a_s, r_s, c) in clustered_points.iter() {
+        if *c == 0 { continue; }
         let a = a_s / *c as f64;
         let r_h = r_s / *c as f64;
         for d_abs in 0..=(20*diagonal as usize) {
@@ -198,15 +332,131 @@ fn main() {
         }
     }
 
-    for i in intersections.iter() {
-        for dx in -5 .. 5 {
-            for dy in -5 .. 5 {
-                lines_image.put_pixel((i.0 as i32 + dx) as u32, (i.1 as i32 + dy) as u32, image::Rgba([255, 255, 0, 255]));
+    for i in ordered_intersections.iter() {
+        for dx in -7 ..= 7 {
+            for dy in -7 ..= 7 {
+                let x = i.0 as i32 + dx;
+                let y = i.1 as i32 + dy;
+                if 0 <= x && x < width as i32 && 0 <= y && y < height as i32 {
+                    lines_image.put_pixel(
+                        x as u32, y as u32,
+                        if dx.abs() >= 6 || dy.abs() >= 6 {
+                            image::Rgba([0, 0, 0, 255])
+                        } else {
+                            image::Rgba([255, 255, 0, 255])
+                        },
+                    );
+                }
             }
         }
     }
 
-    lines_image.save("hough-lines.png").unwrap();
-
+    lines_image.save(format!("outputs/{}.hough-lines.png", stem)).unwrap();
     println!("[{:?}] rendered lines", time.elapsed());
+
+    let a3 = nalgebra::Matrix3::new(
+        ordered_intersections[0].0, ordered_intersections[1].0, ordered_intersections[2].0,
+        ordered_intersections[0].1, ordered_intersections[1].1, ordered_intersections[2].1,
+        1.0, 1.0, 1.0,
+    );
+
+    let a1 = nalgebra::Vector3::new(ordered_intersections[3].0, ordered_intersections[3].1, 1.0);
+    let ax = a3.lu().solve(&a1).unwrap();
+    let a = a3 * nalgebra::Matrix3::new(
+        ax[0],   0.0,   0.0,
+          0.0, ax[1],   0.0,
+          0.0,   0.0, ax[2],
+    );
+
+    // 734x1024
+    // for (x, y) in [(0.0, 0.0), (width as f64, 0.0), (0.0, height as f64), (width as f64, height as f64)] {
+    let b3 = nalgebra::Matrix3::new(
+        0.0, 734.0,    0.0,
+        0.0,  0.0,  1024.0,
+        1.0,  1.0,     1.0,
+    );
+
+    let b1 = nalgebra::Vector3::new(
+         734.0,
+        1024.0,
+           1.0,
+    );
+
+    let bx = b3.lu().solve(&b1).unwrap();
+    let b = b3 * nalgebra::Matrix3::new(
+        bx[0],   0.0,   0.0,
+          0.0, bx[1],   0.0,
+          0.0,   0.0, bx[2],
+    );
+
+    let c = a * b.try_inverse().unwrap();
+
+    //println!("a = {:?}", a);
+    //println!("b = {:?}", b);
+    //println!("c = {:?}", c);
+
+    let mut perspective_image = image::DynamicImage::new_rgba8(734, 1024);
+    for x in 0..734 {
+        for y in 0..1024 {
+            let p = c * nalgebra::Vector3::new(x as f64, y as f64, 1.0);
+            let px = (p[0] / p[2]) as i32;
+            let py = (p[1] / p[2]) as i32;
+
+            //println!("{:?}: {}, {}", p, px, py);
+
+            if 0 <= px && px < height as i32 && 0 <= py && py < width as i32 {
+                perspective_image.put_pixel(x, y, downscaled.get_pixel(px as u32, py as u32));
+            }
+        }
+    }
+    perspective_image.save(format!("outputs/{}.perspective.png", stem)).unwrap();
+    println!("[{:?}] perspective!", time.elapsed());
+
+    let hash = img_hash::HasherConfig::new().to_hasher().hash_image(&perspective_image);
+
+    println!("hash: {}", hash.to_base64());
+
+    dataset.sort_by_key(|entry| hash.dist(&entry.0));
+
+    println!("best: {:?} ({})", dataset[0].2, hash.dist(&dataset[0].0));
+    dataset[0].1.save(format!("outputs/{}.best.png", stem)).unwrap();
+
+    println!("second: {:?} ({})", dataset[1].2, hash.dist(&dataset[1].0));
+    dataset[1].1.save(format!("outputs/{}.second.png", stem)).unwrap();
+
+    println!("third: {:?} ({})", dataset[2].2, hash.dist(&dataset[2].0));
+    dataset[2].1.save(format!("outputs/{}.third.png", stem)).unwrap();
+}
+
+fn main() {
+    let dataset_paths = std::fs::read_dir("dataset/").unwrap();
+
+    let mut progress = 0;
+    let mut errors = 0;
+    let mut dataset = vec![];
+    for path in dataset_paths {
+        progress += 1;
+        let filename = path.unwrap().path();
+        match image::open(&filename) {
+            Ok(img) => {
+                let hash = img_hash::HasherConfig::new().to_hasher().hash_image(&img);
+                dataset.push((hash, img, filename));
+            },
+            Err(_) => {
+                errors += 1;
+            }
+        }
+
+        if progress % 1000 == 0 {
+            println!("loading dataset: {}", progress);
+        }
+    }
+    println!("errors: {}", errors);
+
+
+    let paths = std::fs::read_dir("images/flash/").unwrap();
+
+    for path in paths {
+        process(&path.unwrap().path(), &mut dataset);
+    }
 }
