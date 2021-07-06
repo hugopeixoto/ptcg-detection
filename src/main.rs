@@ -1,16 +1,20 @@
 use image::Luma;
 use image::Rgba;
+use std::io::Write;
+use std::io::BufRead;
 use image::GenericImage;
 use image::GenericImageView;
 use std::time::Instant;
 
-fn process(filename: &std::path::PathBuf, dataset: &mut Vec<(img_hash::ImageHash, image::DynamicImage, std::path::PathBuf)>) {
+fn process(filename: &std::path::PathBuf, dataset: &mut Vec<(img_hash::ImageHash, img_hash::ImageHash, std::path::PathBuf)>) {
     let stem = filename.file_stem().unwrap().to_str().unwrap();
     println!(":::::::::::::::::::::::::::::: started {}", stem);
 
     let mut time = Instant::now();
 
     let source_image = image::open(filename).expect("failed to read image");
+    let source_width = source_image.width();
+    let source_height = source_image.height();
 
     println!("[{:?}] loaded", time.elapsed());
     time = Instant::now();
@@ -70,6 +74,7 @@ fn process(filename: &std::path::PathBuf, dataset: &mut Vec<(img_hash::ImageHash
     }
 
     sobel_image.save(format!("outputs/{}.sobel.png", stem)).unwrap();
+    downscaled.save(format!("outputs/{}.downscaled.png", stem)).unwrap();
     downscaled.grayscale().save(format!("outputs/{}.grayscale.png", stem)).unwrap();
 
     let mut canny = image::DynamicImage::new_luma8(width, height).to_luma8();
@@ -87,16 +92,16 @@ fn process(filename: &std::path::PathBuf, dataset: &mut Vec<(img_hash::ImageHash
 
     let mut border = vec![];
     border.resize((width*height) as usize, 0);
-    let border_threshold = 100;
-    for x in 10..width as usize {
-        for y in 10..height as usize-50 {
+    let border_threshold = 60;
+    for x in 0..width as usize {
+        for y in 0..height as usize {
             let magnitude = sobel[x * height as usize + y];
             if magnitude > border_threshold {
                 border[x * height as usize + y] = 1;
                 break;
             }
         }
-        for ry in 50..height as usize {
+        for ry in 0..height as usize {
             let y = height as usize - 1 - ry;
             let magnitude = sobel[x * height as usize + y];
             if magnitude > border_threshold {
@@ -105,15 +110,15 @@ fn process(filename: &std::path::PathBuf, dataset: &mut Vec<(img_hash::ImageHash
             }
         }
     }
-    for y in 10..height as usize {
-        for x in 10..width as usize {
+    for y in 0..height as usize {
+        for x in 0..width as usize {
             let magnitude = sobel[(x * height as usize + y) as usize];
             if magnitude > border_threshold {
                 border[x * height as usize + y] = 1;
                 break;
             }
         }
-        for rx in 10..width as usize {
+        for rx in 0..width as usize {
             let x = width as usize - 1 - rx;
             let magnitude = sobel[(x * height as usize + y) as usize];
             if magnitude > border_threshold {
@@ -303,6 +308,10 @@ fn process(filename: &std::path::PathBuf, dataset: &mut Vec<(img_hash::ImageHash
     println!("[{:?}] removed parallel intersections ({:?})", time.elapsed(), final_intersections);
     time = Instant::now();
 
+    if final_intersections.len() != 4 {
+        return;
+    }
+
     let mut ordered_intersections = vec![];
     for (x, y) in [(0.0, 0.0), (width as f64, 0.0), (0.0, height as f64), (width as f64, height as f64)] {
         // find closest point to image corner
@@ -353,6 +362,7 @@ fn process(filename: &std::path::PathBuf, dataset: &mut Vec<(img_hash::ImageHash
 
     lines_image.save(format!("outputs/{}.hough-lines.png", stem)).unwrap();
     println!("[{:?}] rendered lines", time.elapsed());
+    time = Instant::now();
 
     let a3 = nalgebra::Matrix3::new(
         ordered_intersections[0].0, ordered_intersections[1].0, ordered_intersections[2].0,
@@ -361,7 +371,10 @@ fn process(filename: &std::path::PathBuf, dataset: &mut Vec<(img_hash::ImageHash
     );
 
     let a1 = nalgebra::Vector3::new(ordered_intersections[3].0, ordered_intersections[3].1, 1.0);
-    let ax = a3.lu().solve(&a1).unwrap();
+    let ax = match a3.lu().solve(&a1) {
+        Some(x) => x,
+        None => { return; }
+    };
     let a = a3 * nalgebra::Matrix3::new(
         ax[0],   0.0,   0.0,
           0.0, ax[1],   0.0,
@@ -404,57 +417,91 @@ fn process(filename: &std::path::PathBuf, dataset: &mut Vec<(img_hash::ImageHash
 
             //println!("{:?}: {}, {}", p, px, py);
 
-            if 0 <= px && px < height as i32 && 0 <= py && py < width as i32 {
-                perspective_image.put_pixel(x, y, downscaled.get_pixel(px as u32, py as u32));
+            if 0 <= px && px < width as i32 && 0 <= py && py < height as i32 {
+                perspective_image.put_pixel(x, y, source_image.get_pixel(px as u32 * source_width / width, py as u32 * source_height / height));
             }
         }
     }
     perspective_image.save(format!("outputs/{}.perspective.png", stem)).unwrap();
     println!("[{:?}] perspective!", time.elapsed());
 
-    let hash = img_hash::HasherConfig::new().to_hasher().hash_image(&perspective_image);
+    let hasher = img_hash::HasherConfig::new().hash_size(16,16).to_hasher();
+    let hash = hasher.hash_image(&perspective_image);
+    let h2 = hasher.hash_image(&perspective_image.clone().crop(0, 0, 734, 90));
 
     println!("hash: {}", hash.to_base64());
 
-    dataset.sort_by_key(|entry| hash.dist(&entry.0));
+    dataset.sort_by_key(|entry| (hash.dist(&entry.0), h2.dist(&entry.1)));
 
-    println!("best: {:?} ({})", dataset[0].2, hash.dist(&dataset[0].0));
-    dataset[0].1.save(format!("outputs/{}.best.png", stem)).unwrap();
+    println!("best: {:?} ({}, {})", dataset[0].2, hash.dist(&dataset[0].0), h2.dist(&dataset[0].1));
+    println!("second: {:?} ({}, {})", dataset[1].2, hash.dist(&dataset[1].0), h2.dist(&dataset[1].1));
+    println!("third: {:?} ({}, {})", dataset[2].2, hash.dist(&dataset[2].0), h2.dist(&dataset[2].1));
+    println!("[{:?}] found matches", time.elapsed());
 
-    println!("second: {:?} ({})", dataset[1].2, hash.dist(&dataset[1].0));
-    dataset[1].1.save(format!("outputs/{}.second.png", stem)).unwrap();
+    image::open(&dataset[0].2).unwrap().save(format!("outputs/{}.best.png", stem)).unwrap();
+    image::open(&dataset[1].2).unwrap().save(format!("outputs/{}.second.png", stem)).unwrap();
+    image::open(&dataset[2].2).unwrap().save(format!("outputs/{}.third.png", stem)).unwrap();
 
-    println!("third: {:?} ({})", dataset[2].2, hash.dist(&dataset[2].0));
-    dataset[2].1.save(format!("outputs/{}.third.png", stem)).unwrap();
+    let hw = 16;
+    let mut hash_image = image::DynamicImage::new_rgba8(hw as u32*2, hw as u32*2);
+    for i in 0..hw * hw {
+        let p0 = (hash.as_bytes()[i/8] >> (i%8)) & 1;
+        let p1 = (dataset[0].0.as_bytes()[i/8] >> (i%8)) & 1;
+        let p2 = (dataset[1].0.as_bytes()[i/8] >> (i%8)) & 1;
+        let p3 = (dataset[2].0.as_bytes()[i/8] >> (i%8)) & 1;
+
+        hash_image.put_pixel((i % hw +  0) as u32, (i / hw +  0) as u32, Rgba([p0 * 255, 0, 0, 255]));
+        hash_image.put_pixel((i % hw + hw) as u32, (i / hw +  0) as u32, Rgba([0, p1 * 255, 0, 255]));
+        hash_image.put_pixel((i % hw +  0) as u32, (i / hw + hw) as u32, Rgba([0, 0, p2 * 255, 255]));
+        hash_image.put_pixel((i % hw + hw) as u32, (i / hw + hw) as u32, Rgba([p3 * 255, 0, p3 * 255, 255]));
+    }
+    hash_image.save(format!("outputs/{}.hash.png", stem)).unwrap();
 }
 
 fn main() {
     let dataset_paths = std::fs::read_dir("dataset/").unwrap();
 
-    let mut progress = 0;
-    let mut errors = 0;
     let mut dataset = vec![];
-    for path in dataset_paths {
-        progress += 1;
-        let filename = path.unwrap().path();
-        match image::open(&filename) {
-            Ok(img) => {
-                let hash = img_hash::HasherConfig::new().to_hasher().hash_image(&img);
-                dataset.push((hash, img, filename));
-            },
-            Err(_) => {
-                errors += 1;
+    if std::path::Path::new("dataset.txt").exists() {
+        for line in std::io::BufReader::new(std::fs::File::open("dataset.txt").unwrap()).lines() {
+            let x = line.unwrap();
+            let parts = x.split(' ').collect::<Vec<_>>();
+
+            println!("[{}, {}, {}]", &parts[0], &parts[1], &parts[2]);
+            dataset.push((
+                    img_hash::ImageHash::from_base64(&parts[1]).unwrap(),
+                    img_hash::ImageHash::from_base64(&parts[2]).unwrap(),
+                    std::path::PathBuf::from(&parts[0]),
+            ))
+        }
+    } else {
+        let mut progress = 0;
+        let mut errors = 0;
+        let hasher = img_hash::HasherConfig::new().hash_size(16,16).to_hasher();
+        let mut file = std::fs::File::create("dataset.txt").unwrap();
+        for path in dataset_paths {
+            progress += 1;
+            let filename = path.unwrap().path();
+            match image::open(&filename) {
+                Ok(img) => {
+                    let hash = hasher.hash_image(&img);
+                    let h2 = hasher.hash_image(&img.clone().crop(0, 0, 734, 90));
+                    file.write(format!("{} {} {}\n", filename.to_str().unwrap(), hash.to_base64(), h2.to_base64()).as_bytes()).unwrap();
+                    dataset.push((hash, h2, filename));
+                },
+                Err(_) => {
+                    errors += 1;
+                }
+            }
+
+            if progress % 1000 == 0 {
+                println!("loading dataset: {}", progress);
             }
         }
-
-        if progress % 1000 == 0 {
-            println!("loading dataset: {}", progress);
-        }
+        println!("errors: {}", errors);
     }
-    println!("errors: {}", errors);
 
-
-    let paths = std::fs::read_dir("images/flash/").unwrap();
+    let paths = std::fs::read_dir("images/movie/").unwrap();
 
     for path in paths {
         process(&path.unwrap().path(), &mut dataset);
