@@ -1,47 +1,90 @@
-use image::Luma;
-use image::Rgba;
 use std::io::Write;
 use std::io::BufRead;
 use image::GenericImage;
 use image::GenericImageView;
 use std::time::Instant;
 
-fn process(filename: &std::path::PathBuf, dataset: &mut Vec<(img_hash::ImageHash, img_hash::ImageHash, std::path::PathBuf)>) {
-    let stem = filename.file_stem().unwrap().to_str().unwrap();
-    println!(":::::::::::::::::::::::::::::: started {}", stem);
+struct DatasetEntry {
+    hash: img_hash::ImageHash,
+    header_hash: img_hash::ImageHash,
+    art_hash: img_hash::ImageHash,
+    path: std::path::PathBuf,
+    colors: Vec<(u8, u8, u8)>,
+}
 
-    let mut time = Instant::now();
+const bucket: u8 = 32;
+fn colors(image: &image::DynamicImage) -> Vec<(u8, u8, u8)> {
+    let mut colors: std::collections::HashMap<(u8,u8,u8), u32> = std::collections::HashMap::new();
+    for x in 0..image.width() {
+        for y in 0..image.height() {
+            let p = image.get_pixel(x, y);
+            let r = p[0] / bucket;
+            let g = p[1] / bucket;
+            let b = p[2] / bucket;
 
-    let source_image = image::open(filename).expect("failed to read image");
-    let source_width = source_image.width();
-    let source_height = source_image.height();
+            if colors.contains_key(&(r,g,b)) {
+                let v = colors[&(r,g,b)];
+                colors.insert((r,g,b), v + 1);
+            } else {
+                colors.insert((r,g,b), 1);
+            }
+        }
+    }
 
-    println!("[{:?}] loaded", time.elapsed());
-    time = Instant::now();
+    let mut sorted = colors.iter().collect::<Vec<_>>();
+    sorted.sort_by_key(|&(_, v)| -(*v as i32));
+    sorted.truncate(5);
 
-    let downscaled = source_image.resize(800, 800, image::imageops::FilterType::Triangle);
+    return sorted.iter().map(|&(k, _)| *k).collect();
+}
 
-    println!("[{:?}] downscaled to {:?}", time.elapsed(), downscaled.dimensions());
-    time = Instant::now();
+fn find_border(sobel: &Vec<u32>, width: u32, height: u32) -> Vec<u32> {
+    let mut border = vec![];
+    border.resize((width*height) as usize, 0);
 
-    let width = downscaled.width();
-    let height = downscaled.height();
-    let diagonal = ((width*width + height*height) as f64).sqrt().ceil();
+    let border_threshold = 60;
+    let margin = 0;
 
-    let detection = edge_detection::canny(
-        downscaled.to_luma8(),
-        1.2,  // sigma
-        0.1,  // strong threshold
-        0.01, // weak threshold
-    );
+    for x in margin..width as usize - margin {
+        for y in margin..height as usize - margin {
+            let magnitude = sobel[x * height as usize + y];
+            if magnitude > border_threshold {
+                border[x * height as usize + y] = 1;
+                break;
+            }
+        }
+        for ry in margin..height as usize - margin {
+            let y = height as usize - 1 - ry;
+            let magnitude = sobel[x * height as usize + y];
+            if magnitude > border_threshold {
+                border[x * height as usize + y] = 1;
+                break;
+            }
+        }
+    }
+    for y in margin..height as usize - margin {
+        for x in margin..width as usize - margin {
+            let magnitude = sobel[(x * height as usize + y) as usize];
+            if magnitude > border_threshold {
+                border[x * height as usize + y] = 1;
+                break;
+            }
+        }
+        for rx in margin..width as usize - margin {
+            let x = width as usize - 1 - rx;
+            let magnitude = sobel[(x * height as usize + y) as usize];
+            if magnitude > border_threshold {
+                border[x * height as usize + y] = 1;
+                break;
+            }
+        }
+    }
 
-    println!("[{:?}] canny detected", time.elapsed());
-    time = Instant::now();
+    border
+}
 
-    // sobel
-
-    let luma8 = downscaled.to_luma8();
-    let mut sobel_image = image::DynamicImage::new_luma8(width, height).to_luma8();
+fn calculate_sobel(sobel: &image::DynamicImage, width: u32, height: u32) -> Vec<u32> {
+    let luma8 = sobel.to_luma8();
     let mut sobel = vec![];
     sobel.resize((width * height) as usize, 0);
     for x in 1..width-1 {
@@ -64,90 +107,15 @@ fn process(filename: &std::path::PathBuf, dataset: &mut Vec<(img_hash::ImageHash
         }
     }
 
-    println!("[{:?}] sobel operated ({}, {})", time.elapsed(), sobel.iter().max().unwrap(), sobel.iter().filter(|&x| *x == 255).count());
-    time = Instant::now();
+    sobel
+}
 
-    for x in 0..width {
-        for y in 0..height {
-            sobel_image.put_pixel(x, y, Luma([sobel[(x*height+y) as usize] as u8]));
-        }
-    }
+fn calculate_hough(border: &Vec<u32>, width: u32, height: u32) -> Vec<u32> {
+    let diagonal = ((width * width + height * height) as f64).sqrt().ceil();
+    let angles = 900;
+    let rhos = 900;
 
-    sobel_image.save(format!("outputs/{}.sobel.png", stem)).unwrap();
-    downscaled.save(format!("outputs/{}.downscaled.png", stem)).unwrap();
-    downscaled.grayscale().save(format!("outputs/{}.grayscale.png", stem)).unwrap();
-
-    let mut canny = image::DynamicImage::new_luma8(width, height).to_luma8();
-    for x in 0..width {
-        for y in 0..height {
-            let mag = (detection[(x as usize,y as usize)].magnitude() * 500.0) as u8;
-            canny.put_pixel(x, y, Luma([mag]));
-        }
-    }
-
-    canny.save(format!("outputs/{}.canny.png", stem)).unwrap();
-
-    println!("[{:?}] saved intermediate images", time.elapsed());
-    time = Instant::now();
-
-    let mut border = vec![];
-    border.resize((width*height) as usize, 0);
-    let border_threshold = 60;
-    for x in 0..width as usize {
-        for y in 0..height as usize {
-            let magnitude = sobel[x * height as usize + y];
-            if magnitude > border_threshold {
-                border[x * height as usize + y] = 1;
-                break;
-            }
-        }
-        for ry in 0..height as usize {
-            let y = height as usize - 1 - ry;
-            let magnitude = sobel[x * height as usize + y];
-            if magnitude > border_threshold {
-                border[x * height as usize + y] = 1;
-                break;
-            }
-        }
-    }
-    for y in 0..height as usize {
-        for x in 0..width as usize {
-            let magnitude = sobel[(x * height as usize + y) as usize];
-            if magnitude > border_threshold {
-                border[x * height as usize + y] = 1;
-                break;
-            }
-        }
-        for rx in 0..width as usize {
-            let x = width as usize - 1 - rx;
-            let magnitude = sobel[(x * height as usize + y) as usize];
-            if magnitude > border_threshold {
-                border[x * height as usize + y] = 1;
-                break;
-            }
-        }
-    }
-
-    println!("[{:?}] ray casting border", time.elapsed());
-    time = Instant::now();
-
-    let mut border_image = image::DynamicImage::new_rgba8(width, height);
-    for x in 10..width as usize {
-        for y in 10..height as usize -50 {
-            if border[x * height as usize + y] > 0 {
-                border_image.put_pixel(x as u32, y as u32, Rgba([0, 0, 0, 255]));
-            }
-        }
-    }
-
-    border_image.save(format!("outputs/{}.border.png", stem)).unwrap();
-    println!("[{:?}] saved border", time.elapsed());
-    time = Instant::now();
-
-    let angles = 300;
-    let rhos = 300;
-
-    let mut hough: Vec<u32> = Vec::new();
+    let mut hough = vec![];
     hough.resize(angles * rhos, 0);
 
     let mut trigs = Vec::with_capacity(angles);
@@ -159,7 +127,7 @@ fn process(filename: &std::path::PathBuf, dataset: &mut Vec<(img_hash::ImageHash
     for x in 0..width {
         for y in 0..height {
             let magnitude = border[(x * height + y) as usize];
-            if magnitude >= 0 {
+            if magnitude > 0 {
                 for a in 0..angles {
                     let rho = x as f64 * trigs[a].0 + y as f64 * trigs[a].1;
                     if rho >= 0.0 {
@@ -171,34 +139,52 @@ fn process(filename: &std::path::PathBuf, dataset: &mut Vec<(img_hash::ImageHash
         }
     }
 
-    let maximum_weight = hough.iter().max().unwrap();
+    hough
+}
 
-    println!("[{:?}] hough transformed ({})", time.elapsed(), maximum_weight);
+
+fn process(source_image: &image::DynamicImage, dataset: &mut Vec<DatasetEntry>, stem: &str) {
+    println!(":::::::::::::::::::::::::::::: started");
+
+    let mut time = Instant::now();
+
+    let source_width = source_image.width();
+    let source_height = source_image.height();
+
+    let downscaled = source_image.resize(800, 800, image::imageops::FilterType::Triangle);
+
+    eprintln!("[{:?}] downscaled to {:?}", time.elapsed(), downscaled.dimensions());
     time = Instant::now();
+
+    let width = downscaled.width();
+    let height = downscaled.height();
+    let diagonal = ((width * width + height * height) as f64).sqrt().ceil();
+
+    let sobel = calculate_sobel(&downscaled, width, height);
+    eprintln!("[{:?}] calculate_sobel", time.elapsed());
+    time = Instant::now();
+
+    let border = find_border(&sobel, width, height);
+    eprintln!("[{:?}] find_border", time.elapsed());
+
+    let hough = calculate_hough(&border, width, height);
+    eprintln!("[{:?}] calculate_hough", time.elapsed());
+    time = Instant::now();
+
+    let angles = 900;
+    let rhos = 900;
 
     let mut points = vec![];
     for a in 0..angles {
         for r in 0..rhos {
-            let x = hough[a * rhos + r]; // (hough[a*rhos + r] * 255 / maximum_weight) as u8;
+            let x = hough[a * rhos + r];
             if x > 100 {
                 points.push((a, r));
             }
         }
     }
 
-    println!("[{:?}] found lines ({})", time.elapsed(), points.len());
-    time = Instant::now();
-
-    let mut hough_image = image::DynamicImage::new_luma8(angles as u32, rhos as u32);
-    for a in 0..angles {
-        for r in 0..rhos {
-            let x = (hough[a*rhos + r] * 255 / maximum_weight) as u8;
-            hough_image.put_pixel(a as u32, r as u32,  image::Rgba([x, x, x, 255]));
-        }
-    }
-    hough_image.save(format!("outputs/{}.hough.png", stem)).unwrap();
-
-    println!("[{:?}] saved hough transform", time.elapsed());
+    eprintln!("[{:?}] found lines ({})", time.elapsed(), points.len());
     time = Instant::now();
 
     let mut clustered_points: Vec<(f64, f64, usize)> = vec![];
@@ -215,8 +201,7 @@ fn process(filename: &std::path::PathBuf, dataset: &mut Vec<(img_hash::ImageHash
         }
     }
 
-    println!("[{:?}] clustered lines ({})", time.elapsed(), clustered_points.len());
-    println!("{:?}", clustered_points);
+    eprintln!("[{:?}] clustered lines ({})", time.elapsed(), clustered_points.len());
     time = Instant::now();
 
     let mut intersections = vec![];
@@ -245,7 +230,7 @@ fn process(filename: &std::path::PathBuf, dataset: &mut Vec<(img_hash::ImageHash
         }
     }
 
-    println!("[{:?}] found intersections ({})", time.elapsed(), intersections.len());
+    eprintln!("[{:?}] found intersections ({})", time.elapsed(), intersections.len());
     time = Instant::now();
 
     let mut clustered_intersections: Vec<(f64, f64)> = vec![];
@@ -270,7 +255,7 @@ fn process(filename: &std::path::PathBuf, dataset: &mut Vec<(img_hash::ImageHash
         clustered_intersections[i].1 = clustered_intersections[i].1 / counts[i] as f64;
     }
 
-    println!("[{:?}] clustered intersections ({})", time.elapsed(), clustered_intersections.len());
+    eprintln!("[{:?}] clustered intersections ({})", time.elapsed(), clustered_intersections.len());
     time = Instant::now();
 
     let mut redundant = vec![];
@@ -303,9 +288,7 @@ fn process(filename: &std::path::PathBuf, dataset: &mut Vec<(img_hash::ImageHash
         }
     }
 
-    println!("redundant: {:?}", redundant);
-
-    println!("[{:?}] removed parallel intersections ({:?})", time.elapsed(), final_intersections);
+    eprintln!("[{:?}] removed parallel intersections ({:?})", time.elapsed(), final_intersections);
     time = Instant::now();
 
     if final_intersections.len() != 4 {
@@ -318,50 +301,7 @@ fn process(filename: &std::path::PathBuf, dataset: &mut Vec<(img_hash::ImageHash
         ordered_intersections.push(final_intersections.iter().min_by_key(|(px, py)| ((px - x).powi(2) + (py - y).powi(2)) as u32).unwrap());
     }
 
-    println!("[{:?}] sorted intersections ({:?})", time.elapsed(), ordered_intersections);
-    time = Instant::now();
-
-    let mut lines_image = downscaled.clone();
-    for (a_s, r_s, c) in clustered_points.iter() {
-        if *c == 0 { continue; }
-        let a = a_s / *c as f64;
-        let r_h = r_s / *c as f64;
-        for d_abs in 0..=(20*diagonal as usize) {
-            let d = (d_abs as f64 / 10.0) - diagonal;
-            let r = r_h * diagonal / rhos as f64;
-            let r2 = (r*r + d*d).sqrt();
-            let d2 = (a as f64 * 2.0 * std::f64::consts::PI / angles as f64) - (d / r2).asin();
-
-            let x = r2 * d2.cos();
-            let y = r2 * d2.sin();
-
-            if 0.0 <= x && x < width as f64 && 0.0 <= y && y < height as f64 {
-                lines_image.put_pixel(x as u32, y as u32, image::Rgba([255, 0, 255, 255]));
-            }
-        }
-    }
-
-    for i in ordered_intersections.iter() {
-        for dx in -7 ..= 7 {
-            for dy in -7 ..= 7 {
-                let x = i.0 as i32 + dx;
-                let y = i.1 as i32 + dy;
-                if 0 <= x && x < width as i32 && 0 <= y && y < height as i32 {
-                    lines_image.put_pixel(
-                        x as u32, y as u32,
-                        if dx.abs() >= 6 || dy.abs() >= 6 {
-                            image::Rgba([0, 0, 0, 255])
-                        } else {
-                            image::Rgba([255, 255, 0, 255])
-                        },
-                    );
-                }
-            }
-        }
-    }
-
-    lines_image.save(format!("outputs/{}.hough-lines.png", stem)).unwrap();
-    println!("[{:?}] rendered lines", time.elapsed());
+    eprintln!("[{:?}] sorted intersections ({:?})", time.elapsed(), ordered_intersections);
     time = Instant::now();
 
     let a3 = nalgebra::Matrix3::new(
@@ -404,10 +344,6 @@ fn process(filename: &std::path::PathBuf, dataset: &mut Vec<(img_hash::ImageHash
 
     let c = a * b.try_inverse().unwrap();
 
-    //println!("a = {:?}", a);
-    //println!("b = {:?}", b);
-    //println!("c = {:?}", c);
-
     let mut perspective_image = image::DynamicImage::new_rgba8(734, 1024);
     for x in 0..734 {
         for y in 0..1024 {
@@ -415,47 +351,79 @@ fn process(filename: &std::path::PathBuf, dataset: &mut Vec<(img_hash::ImageHash
             let px = (p[0] / p[2]) as i32;
             let py = (p[1] / p[2]) as i32;
 
-            //println!("{:?}: {}, {}", p, px, py);
-
             if 0 <= px && px < width as i32 && 0 <= py && py < height as i32 {
                 perspective_image.put_pixel(x, y, source_image.get_pixel(px as u32 * source_width / width, py as u32 * source_height / height));
             }
         }
     }
-    perspective_image.save(format!("outputs/{}.perspective.png", stem)).unwrap();
-    println!("[{:?}] perspective!", time.elapsed());
 
-    let hasher = img_hash::HasherConfig::new().hash_size(16,16).to_hasher();
+    eprintln!("[{:?}] perspective!", time.elapsed());
+    time = Instant::now();
+
+    let hasher = img_hash::HasherConfig::new().hash_size(16,16).hash_alg(img_hash::HashAlg::Gradient).to_hasher();
+
     let hash = hasher.hash_image(&perspective_image);
-    let h2 = hasher.hash_image(&perspective_image.clone().crop(0, 0, 734, 90));
+    //let h2 = hasher.hash_image(&perspective_image.clone().crop(0, 0, 734, 90));
 
-    println!("hash: {}", hash.to_base64());
+    eprintln!("[{:?}] calculate_phash", time.elapsed());
+    time = Instant::now();
 
-    dataset.sort_by_key(|entry| (hash.dist(&entry.0), h2.dist(&entry.1)));
+    let best = dataset.iter().min_by_key(|entry| hash.dist(&entry.hash)).unwrap();
 
-    println!("best: {:?} ({}, {})", dataset[0].2, hash.dist(&dataset[0].0), h2.dist(&dataset[0].1));
-    println!("second: {:?} ({}, {})", dataset[1].2, hash.dist(&dataset[1].0), h2.dist(&dataset[1].1));
-    println!("third: {:?} ({}, {})", dataset[2].2, hash.dist(&dataset[2].0), h2.dist(&dataset[2].1));
-    println!("[{:?}] found matches", time.elapsed());
+    println!("[{:?}] find_match {:?}", time.elapsed(), best.path);
+    time = Instant::now();
 
-    image::open(&dataset[0].2).unwrap().save(format!("outputs/{}.best.png", stem)).unwrap();
-    image::open(&dataset[1].2).unwrap().save(format!("outputs/{}.second.png", stem)).unwrap();
-    image::open(&dataset[2].2).unwrap().save(format!("outputs/{}.third.png", stem)).unwrap();
-
-    let hw = 16;
-    let mut hash_image = image::DynamicImage::new_rgba8(hw as u32*2, hw as u32*2);
-    for i in 0..hw * hw {
-        let p0 = (hash.as_bytes()[i/8] >> (i%8)) & 1;
-        let p1 = (dataset[0].0.as_bytes()[i/8] >> (i%8)) & 1;
-        let p2 = (dataset[1].0.as_bytes()[i/8] >> (i%8)) & 1;
-        let p3 = (dataset[2].0.as_bytes()[i/8] >> (i%8)) & 1;
-
-        hash_image.put_pixel((i % hw +  0) as u32, (i / hw +  0) as u32, Rgba([p0 * 255, 0, 0, 255]));
-        hash_image.put_pixel((i % hw + hw) as u32, (i / hw +  0) as u32, Rgba([0, p1 * 255, 0, 255]));
-        hash_image.put_pixel((i % hw +  0) as u32, (i / hw + hw) as u32, Rgba([0, 0, p2 * 255, 255]));
-        hash_image.put_pixel((i % hw + hw) as u32, (i / hw + hw) as u32, Rgba([p3 * 255, 0, p3 * 255, 255]));
+    let mut border_image = image::DynamicImage::new_rgba8(width, height);
+    for x in 0..width as usize {
+        for y in 0..height as usize {
+            if border[x * height as usize + y] > 0 {
+                border_image.put_pixel(x as u32, y as u32, image::Rgba([0, 0, 0, 255]));
+            }
+        }
     }
-    hash_image.save(format!("outputs/{}.hash.png", stem)).unwrap();
+
+    let mut lines_image = source_image.clone();
+    for &(a, r_h) in points.iter() {
+        for d_abs in 0..=(20*diagonal as usize) {
+            let d = (d_abs as f64 / 10.0) - diagonal;
+            let r = r_h as f64 * diagonal / rhos as f64;
+            let r2 = (r*r + d*d).sqrt();
+            let d2 = (a as f64 * 2.0 * std::f64::consts::PI / angles as f64) - (d / r2).asin();
+
+            let x = r2 * d2.cos();
+            let y = r2 * d2.sin();
+
+            if 0.0 <= x && x < width as f64 && 0.0 <= y && y < height as f64 {
+                lines_image.put_pixel(x as u32, y as u32, image::Rgba([255, 0, 255, 255]));
+            }
+        }
+    }
+
+
+    image::open(format!("images/canon/{}.png", stem)).unwrap().save(format!("outputs/{}.original.png", stem)).unwrap();
+    border_image.save(format!("outputs/{}.border.png", stem)).unwrap();
+    lines_image.save(format!("outputs/{}.hough-lines.png", stem)).unwrap();
+    perspective_image.save(format!("outputs/{}.perspective.png", stem)).unwrap();
+    image::open(&best.path).unwrap().save(format!("outputs/{}.best.png", stem)).unwrap();
+    println!("[{:?}] debug_images", time.elapsed());
+    // let colors = colors(&perspective_image);
+    // eprintln!("[{:?}] best color: {:?}", time.elapsed(), colors[0]);
+    //
+    // let mut color_image = image::DynamicImage::new_rgba8(20, 5);
+    // for x in 0..5 {
+    //     for c in 0..5 {
+    //         color_image.put_pixel(x, c as u32, Rgba([colors[c].0 * bucket, colors[c].1*bucket, colors[c].2*bucket, 255]));
+    //     }
+    //
+    //     for i in 0..3 {
+    //         for c in 0..5 {
+    //             let color = dataset[i].colors[c];
+    //             color_image.put_pixel(x + 5 * (i as u32 + 1), c as u32, Rgba([color.0 * bucket, color.1*bucket, color.2*bucket, 255]));
+    //         }
+    //     }
+    // }
+    //
+    // color_image.save(format!("outputs/{}.color.png", stem)).unwrap();
 }
 
 fn main() {
@@ -467,27 +435,50 @@ fn main() {
             let x = line.unwrap();
             let parts = x.split(' ').collect::<Vec<_>>();
 
-            println!("[{}, {}, {}]", &parts[0], &parts[1], &parts[2]);
-            dataset.push((
-                    img_hash::ImageHash::from_base64(&parts[1]).unwrap(),
-                    img_hash::ImageHash::from_base64(&parts[2]).unwrap(),
-                    std::path::PathBuf::from(&parts[0]),
-            ))
+            let color_bytes = base64::decode(&parts[4]).unwrap();
+            dataset.push(DatasetEntry {
+                    path: std::path::PathBuf::from(&parts[0]),
+                    hash: img_hash::ImageHash::from_base64(&parts[1]).unwrap(),
+                    header_hash: img_hash::ImageHash::from_base64(&parts[2]).unwrap(),
+                    art_hash: img_hash::ImageHash::from_base64(&parts[3]).unwrap(),
+                    colors: vec![
+                        (color_bytes[0], color_bytes[1], color_bytes[2]),
+                        (color_bytes[3], color_bytes[4], color_bytes[5]),
+                        (color_bytes[6], color_bytes[7], color_bytes[8]),
+                        (color_bytes[9], color_bytes[10], color_bytes[11]),
+                        (color_bytes[12], color_bytes[13], color_bytes[14]),
+                    ],
+            })
         }
     } else {
         let mut progress = 0;
         let mut errors = 0;
-        let hasher = img_hash::HasherConfig::new().hash_size(16,16).to_hasher();
+        let hasher = img_hash::HasherConfig::new().hash_size(16,16).hash_alg(img_hash::HashAlg::Gradient).to_hasher();
         let mut file = std::fs::File::create("dataset.txt").unwrap();
-        for path in dataset_paths {
+        for entry in dataset_paths {
             progress += 1;
-            let filename = path.unwrap().path();
-            match image::open(&filename) {
+            let path = entry.unwrap().path();
+            match image::open(&path) {
                 Ok(img) => {
                     let hash = hasher.hash_image(&img);
-                    let h2 = hasher.hash_image(&img.clone().crop(0, 0, 734, 90));
-                    file.write(format!("{} {} {}\n", filename.to_str().unwrap(), hash.to_base64(), h2.to_base64()).as_bytes()).unwrap();
-                    dataset.push((hash, h2, filename));
+                    let header_hash = hasher.hash_image(&img.clone().crop(0, 0, 734, 90));
+                    let art_hash = hasher.hash_image(&img.clone().crop(60, 100, 615, 380));
+                    let colors = colors(&img);
+                    let color_bytes = vec![
+                        colors[0].0, colors[0].1, colors[0].2,
+                        colors[1].0, colors[1].1, colors[1].2,
+                        colors[2].0, colors[2].1, colors[2].2,
+                        colors[3].0, colors[3].1, colors[3].2,
+                        colors[4].0, colors[4].1, colors[4].2,
+                    ];
+                    file.write(format!("{} {} {} {} {}\n",
+                                       path.to_str().unwrap(),
+                                       hash.to_base64(),
+                                       header_hash.to_base64(),
+                                       art_hash.to_base64(),
+                                       base64::encode(&color_bytes),
+                    ).as_bytes()).unwrap();
+                    dataset.push(DatasetEntry { hash, header_hash, art_hash, path, colors });
                 },
                 Err(_) => {
                     errors += 1;
@@ -501,9 +492,17 @@ fn main() {
         println!("errors: {}", errors);
     }
 
-    let paths = std::fs::read_dir("images/movie/").unwrap();
+    let paths = std::fs::read_dir("images/canon/").unwrap();
 
     for path in paths {
-        process(&path.unwrap().path(), &mut dataset);
+        let filename = path.unwrap().path();
+        let source_image = image::open(&filename).expect("failed to read image");
+        let downscaled = source_image.resize(800, 800, image::imageops::FilterType::Triangle);
+
+        let time = Instant::now();
+
+        process(&downscaled, &mut dataset, filename.file_stem().unwrap().to_str().unwrap());
+
+        eprintln!("[{:?}] processed {:?}", time.elapsed(), filename);
     }
 }

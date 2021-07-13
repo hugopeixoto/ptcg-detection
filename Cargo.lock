@@ -132,6 +132,7 @@ dependencies = [
 name = "detection"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "edge-detection",
  "image",
  "img_hash",
@@ -195,8 +196,6 @@ dependencies = [
 [[package]]
 name = "img_hash"
 version = "3.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ea4eac6fc4f64ed363d5c210732b747bfa5ddd8a25ac347d887f298c3a70b49"
 dependencies = [
  "base64",
  "image",
