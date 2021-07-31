@@ -1,5 +1,5 @@
 pub fn calculate(sobel: &Vec<u32>, width: u32, height: u32, border: &mut Vec<u32>) {
-    let border_threshold = 50;
+    let border_threshold = 40;
     let margin = 0;
 
     for i in border.iter_mut() { *i = 0; }

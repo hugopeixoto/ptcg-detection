@@ -1,4 +1,5 @@
 use image::GenericImageView;
+use image::GenericImage;
 use std::io::BufRead;
 use std::io::Write;
 use std::time::Instant;
@@ -8,6 +9,7 @@ mod sobel;
 mod hough;
 mod border;
 mod corners;
+mod perspective;
 
 pub struct DatasetEntry {
     pub hash: img_hash::ImageHash,
@@ -35,7 +37,10 @@ pub struct ProcessingBuffers {
     pub sobel: Vec<u32>,
     pub border: Vec<u32>,
     pub hough: Vec<u32>,
+    pub lines: Vec<(f64, f64, usize)>,
+    pub corners: Vec<(f64, f64)>,
     pub source_image: image::DynamicImage,
+    pub perspective_image: image::DynamicImage,
 }
 
 impl ProcessingBuffers {
@@ -46,7 +51,10 @@ impl ProcessingBuffers {
             sobel: vec![],
             border: vec![],
             hough: vec![],
+            lines: vec![],
+            corners: vec![],
             source_image: image::DynamicImage::new_rgba8(width, height),
+            perspective_image: image::DynamicImage::new_rgba8(0, 0),
         };
 
         b.sobel.resize((width * height) as usize, 0);
@@ -61,8 +69,8 @@ impl ProcessingBuffers {
 const BUCKET: u8 = 32;
 pub fn colors(image: &image::DynamicImage) -> Vec<(u8, u8, u8)> {
     let mut colors: std::collections::HashMap<(u8,u8,u8), u32> = std::collections::HashMap::new();
-    for x in 0..image.width() {
-        for y in 0..image.height() {
+    for x in 0..GenericImageView::width(image) {
+        for y in 0..GenericImageView::height(image) {
             let p = image.get_pixel(x, y);
             let r = p[0] / BUCKET;
             let g = p[1] / BUCKET;
@@ -95,7 +103,8 @@ pub fn calculate_dataset_entry(path: &std::path::Path) -> DatasetEntry {
         .with_guessed_format()
         .unwrap()
         .decode()
-        .unwrap();
+        .unwrap()
+        .blur(1.5);
 
     DatasetEntry {
         hash: hasher.hash_image(&img),
@@ -144,16 +153,51 @@ pub fn load_or_build_dataset(dataset_path: &str, dataset_cache_filename: &str) -
     }
 }
 
-pub fn process(processing: &mut ProcessingPipeline, dataset: &Vec<DatasetEntry>, stem: &str, debug_images: bool) -> ProcessingTimes {
-    let mut times = ProcessingTimes::default();
+pub trait Luma8 {
+    fn get(&self, x: u32, y: u32) -> u8;
+    fn width(&self) -> u32;
+    fn height(&self) -> u32;
+}
 
-    if debug_images { processing.buffers.source_image.save(format!("outputs/{}.original.png", stem)).unwrap(); }
+struct YUYV442<'a> {
+    data: &'a [u8],
+    width: u32,
+    height: u32,
+}
+
+impl<'a> Luma8 for YUYV442<'a> {
+    fn get(&self, x: u32, y: u32) -> u8 {
+        self.data[(y * self.width * 2 + x * 2) as usize]
+    }
+    fn width(&self) -> u32 {
+        self.width
+    }
+    fn height(&self) -> u32 {
+        self.height
+    }
+}
+
+impl Luma8 for image::DynamicImage {
+    fn get(&self, x: u32, y: u32) -> u8 {
+        self.get_pixel(x, y)[0]
+    }
+    fn width(&self) -> u32 {
+        image::GenericImageView::width(self) as u32
+    }
+    fn height(&self) -> u32 {
+        image::GenericImageView::height(self) as u32
+    }
+}
+
+
+pub fn process<'a>(processing: &mut ProcessingPipeline, dataset: &'a Vec<DatasetEntry>) -> (ProcessingTimes, Option<(&'a DatasetEntry, u32, &'a DatasetEntry, u32)>) {
+    let mut times = ProcessingTimes::default();
 
     let width = processing.buffers.width;
     let height = processing.buffers.height;
 
     let mut time = Instant::now();
-    sobel::calculate(&processing.frame, width, height, &mut processing.buffers.sobel);
+    sobel::calculate(&YUYV442 { data: &processing.frame, width, height }, &mut processing.buffers.sobel);
     times.sobel = time.elapsed();
     time = Instant::now();
 
@@ -165,63 +209,28 @@ pub fn process(processing: &mut ProcessingPipeline, dataset: &Vec<DatasetEntry>,
     times.hough = time.elapsed();
     time = Instant::now();
 
-    let corners = corners::calculate(&processing.buffers.hough, width, height);
+    // split into lines + corners?
+    corners::calculate(&processing.buffers.hough, width, height, &mut processing.buffers.lines, &mut processing.buffers.corners);
     times.corners = time.elapsed();
     time = Instant::now();
 
-    if corners.is_empty() {
-        return times;
+    processing.buffers.perspective_image = image::DynamicImage::new_rgba8(734, 1024);
+    if processing.buffers.corners.is_empty() {
+        return (times, None);
     }
 
-    let a3 = nalgebra::Matrix3::new(
-        corners[0].0, corners[1].0, corners[2].0,
-        corners[0].1, corners[1].1, corners[2].1,
-        1.0, 1.0, 1.0,
-    );
+    let buffer = 5;
+    let c = perspective::calculate(&processing.buffers.corners, 734.0 + buffer as f64 * 2.0, 1024.0 + buffer as f64 * 2.0);
 
-    let a1 = nalgebra::Vector3::new(corners[3].0, corners[3].1, 1.0);
-    let ax = match a3.lu().solve(&a1) {
-        Some(x) => x,
-        None => { return times; }
-    };
-    let a = a3 * nalgebra::Matrix3::new(
-        ax[0],   0.0,   0.0,
-          0.0, ax[1],   0.0,
-          0.0,   0.0, ax[2],
-    );
-
-    // 734x1024
-    let b3 = nalgebra::Matrix3::new(
-        0.0, 734.0,    0.0,
-        0.0,  0.0,  1024.0,
-        1.0,  1.0,     1.0,
-    );
-
-    let b1 = nalgebra::Vector3::new(
-         734.0,
-        1024.0,
-           1.0,
-    );
-
-    let bx = b3.lu().solve(&b1).unwrap();
-    let b = b3 * nalgebra::Matrix3::new(
-        bx[0],   0.0,   0.0,
-          0.0, bx[1],   0.0,
-          0.0,   0.0, bx[2],
-    );
-
-    let c = a * b.try_inverse().unwrap();
-
-    let mut perspective_image = image::DynamicImage::new_rgba8(734, 1024).to_rgba8();
-    for y in 0..1024 {
-        for x in 0..734 {
+    for y in buffer..1024 + buffer {
+        for x in buffer..734 + buffer {
             let p = c * nalgebra::Vector3::new(x as f64, y as f64, 1.0);
             let px = (p[0] / p[2]) as i32;
             let py = (p[1] / p[2]) as i32;
 
             if 0 <= px && px < width as i32 && 0 <= py && py < height as i32 {
                 let pixel = processing.buffers.source_image.get_pixel(px as u32, py as u32);
-                perspective_image.put_pixel(x, y, pixel);
+                processing.buffers.perspective_image.put_pixel(x - buffer, y - buffer, pixel);
             }
         }
     }
@@ -229,18 +238,24 @@ pub fn process(processing: &mut ProcessingPipeline, dataset: &Vec<DatasetEntry>,
     times.perspective = time.elapsed();
     time = Instant::now();
 
-    let hasher = img_hash::HasherConfig::new().hash_size(16,16).hash_alg(img_hash::HashAlg::Gradient).to_hasher();
+    let hasher = img_hash::HasherConfig::new()
+        .hash_size(16,16)
+        .hash_alg(img_hash::HashAlg::Gradient)
+        .to_hasher();
 
-    let hash = hasher.hash_image(&perspective_image);
+    let hash = hasher.hash_image(&processing.buffers.perspective_image);
+
+    let mut dataset_indexes = (0 .. dataset.len()).collect::<Vec<_>>();
+    dataset_indexes.sort_by_key(|i| hash.dist(&dataset[*i].hash));
+
     let best = dataset.iter().min_by_key(|entry| hash.dist(&entry.hash)).unwrap();
 
     times.phash = time.elapsed();
 
-    println!("match: {:?} ({})", best.path, hash.dist(&best.hash));
-
-    // perspective_image.save(format!("outputs/{}.perspective.png", stem)).unwrap();
-    // image::open(&best.path).unwrap().save(format!("outputs/{}.best.png", stem)).unwrap();
-    // println!("[{:?}] debug_images", time.elapsed());
-
-    times
+    (times, Some((
+                best,
+                hash.dist(&best.hash),
+                &dataset[dataset_indexes[1]],
+                hash.dist(&dataset[dataset_indexes[1]].hash),
+                )))
 }

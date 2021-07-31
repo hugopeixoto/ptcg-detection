@@ -1,41 +1,68 @@
-pub fn calculate(hough: &Vec<u32>, width: u32, height: u32) -> Vec<(f64, f64)> {
+
+fn wrapped_delta(p1: f64, p2: f64, width: f64) -> f64 {
+    if p1 > p2 {
+        -wrapped_delta(p2, p1, width)
+    } else if p2 - p1 < width / 2.0 {
+        p2 - p1
+    } else {
+        p2 - (p1 + width)
+    }
+}
+
+fn wrapped_weighted_average(p1: f64, c1: f64, p2: f64, c2: f64, width: f64) -> f64 {
+    let d = wrapped_delta(p1, p2, width);
+    (p1 * c1 + (p1 + d) * c2) / (c1 + c2)
+}
+
+pub fn calculate(hough: &Vec<u32>, width: u32, height: u32, lines: &mut Vec<(f64, f64, usize)>, corners: &mut Vec<(f64, f64)>) {
     let angles = 900;
     let rhos = 900;
     let diagonal = ((width * width + height * height) as f64).sqrt().ceil();
 
-    let mut lines = vec![];
+    let mut candidate_lines = vec![];
     for a in 0..angles {
         for r in 0..rhos {
             if hough[a * rhos + r] > 200 {
-                lines.push((a, r));
+                candidate_lines.push((a as f64, r as f64));
             }
         }
     }
 
-    let mut clustered_lines: Vec<(f64, f64, usize)> = vec![];
-    for point in lines.iter() {
-        let dup = clustered_lines.iter().position(|p| ((p.0/p.2 as f64) - point.0 as f64).abs() < 20.0 && ((p.1/p.2 as f64) - point.1 as f64).abs() < 50.0);
+    lines.truncate(0);
+    for point in candidate_lines.iter() {
+        let dup = lines.iter().position(|p| {
+            let delta_angle = wrapped_delta(p.0, point.0, angles as f64).abs();
+            let delta_rho = (p.1 - point.1).abs();
+
+            delta_angle < 20.0 && delta_rho < 50.0
+        });
+
         match dup {
             None => {
-                clustered_lines.push((point.0 as f64, point.1 as f64, 1));
+                lines.push((point.0, point.1, 1));
             },
             Some(index) => {
-                let (p, r, c) = clustered_lines[index];
-                clustered_lines[index] = (p + point.0 as f64, r + point.1 as f64, c + 1);
+                let (p, r, c) = lines[index];
+
+                lines[index] = (
+                    wrapped_weighted_average(p, c as f64, point.0, 1.0, angles as f64),
+                    (r * c as f64 + point.1 as f64) / (c as f64 + 1.0),
+                    c + 1,
+                );
             }
         }
     }
 
     let mut intersections = vec![];
-    for i1 in 0..clustered_lines.len() {
-        let p1 = clustered_lines[i1];
-        for i2 in i1 + 1 .. clustered_lines.len() {
-            let p2 = clustered_lines[i2];
+    for i1 in 0..lines.len() {
+        let p1 = lines[i1];
+        for i2 in i1 + 1 .. lines.len() {
+            let p2 = lines[i2];
             // find intersection
-            let a1 = p1.0 / (p1.2 as f64) * 2.0 * std::f64::consts::PI / angles as f64;
-            let a2 = p2.0 / (p2.2 as f64) * 2.0 * std::f64::consts::PI / angles as f64;
-            let r1 = p1.1 / p1.2 as f64;
-            let r2 = p2.1 / p2.2 as f64;
+            let a1 = p1.0 * 2.0 * std::f64::consts::PI / angles as f64;
+            let a2 = p2.0 * 2.0 * std::f64::consts::PI / angles as f64;
+            let r1 = p1.1;
+            let r2 = p2.1;
             let ct1 = a1.cos();
             let ct2 = a2.cos();
             let st1 = a1.sin();
@@ -46,73 +73,21 @@ pub fn calculate(hough: &Vec<u32>, width: u32, height: u32) -> Vec<(f64, f64)> {
                 let y3 = (-ct2 * (r1 * diagonal / rhos as f64) + ct1 * (r2 * diagonal / rhos as f64)) / det;
 
                 if 0.0 <= x3 && x3 < width as f64 && 0.0 <= y3 && y3 < height as f64 {
-                    intersections.push((x3 as u32, y3 as u32));
+                    intersections.push((x3, y3));
                 }
             }
         }
     }
 
-    let mut clustered_intersections: Vec<(f64, f64)> = vec![];
-    let mut counts = vec![];
-    for point in intersections.iter() {
-        let dup = clustered_intersections.iter().position(|p| ((p.0 - point.0 as f64).powi(2) + (p.1 - point.1 as f64).powi(2)) < 256.0);
-        match dup {
-            None => {
-                clustered_intersections.push((point.0 as f64, point.1 as f64));
-                counts.push(1);
-            },
-            Some(index) => {
-                let (p, r) = clustered_intersections[index];
-                clustered_intersections[index] = (p + point.0 as f64, r + point.1 as f64);
-                counts[index] += 1;
-            }
-        }
+    corners.truncate(0);
+    if intersections.len() != 4 {
+        return;
     }
 
-    for i in 0..counts.len() {
-        clustered_intersections[i].0 = clustered_intersections[i].0 / counts[i] as f64;
-        clustered_intersections[i].1 = clustered_intersections[i].1 / counts[i] as f64;
-    }
-
-    let mut redundant = vec![];
-    redundant.resize(clustered_intersections.len(), false);
-    for i in 0..clustered_intersections.len() {
-        let p1 = clustered_intersections[i];
-        for j in i+1..clustered_intersections.len() {
-            let p2 = clustered_intersections[j];
-            for k in j+1..clustered_intersections.len() {
-                let p3 = clustered_intersections[k];
-
-                let area = 0.5 * (p1.0 * (p2.1 - p3.1) + p2.0 * (p3.1 - p1.1) + p3.0 * (p1.1 - p2.1)).abs();
-                if area < 200.0 {
-                    let d12 = (p1.0 - p2.0).powi(2) + (p1.1 - p2.1).powi(2);
-                    let d23 = (p2.0 - p3.0).powi(2) + (p2.1 - p3.1).powi(2);
-                    let d13 = (p1.0 - p3.0).powi(2) + (p1.1 - p3.1).powi(2);
-
-                    if d12 >= d23 && d12 >= d13 { redundant[k] = true; }
-                    if d23 >= d13 && d23 >= d12 { redundant[i] = true; }
-                    if d13 >= d12 && d13 >= d23 { redundant[j] = true; }
-                }
-            }
-        }
-    }
-
-    let mut final_intersections = vec![];
-    for i in 0..clustered_intersections.len() {
-        if !redundant[i] {
-            final_intersections.push(clustered_intersections[i]);
-        }
-    }
-
-    if final_intersections.len() != 4 {
-        return vec![];
-    }
-
-    let mut corners = vec![];
+    // Sort corners according to proximity to image corners.
+    // This assumes the card is not rotated to make processing faster,
+    // avoiding having to try several rotations.
     for (x, y) in [(0.0, 0.0), (width as f64, 0.0), (0.0, height as f64), (width as f64, height as f64)] {
-        // find closest point to image corner
-        corners.push(*final_intersections.iter().min_by_key(|(px, py)| ((px - x).powi(2) + (py - y).powi(2)) as u32).unwrap());
+        corners.push(*intersections.iter().min_by_key(|(px, py)| ((px - x).powi(2) + (py - y).powi(2)) as u32).unwrap());
     }
-
-    corners
 }
