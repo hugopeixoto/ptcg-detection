@@ -6,6 +6,7 @@ use v4l::video::Capture;
 
 fn main() {
     let dataset = load_or_build_dataset("dataset/", "dataset.txt");
+    let templates = load_templates();
 
     let width = 1920;
     let height = 1080;
@@ -54,15 +55,12 @@ fn main() {
                 processing.buffers.source_image.put_pixel(x as u32 + 1, y as u32, image::Rgba([r2, g2, b2, 255]));
             }
         }
-        //println!("[{:?}] YUYV2RGB", t.elapsed());
-        //t = Instant::now();
 
-        let (times, best) = process(&mut processing, &dataset);
-        // println!("[{:?}] process", t.elapsed());
+        let (times, best, detected_set) = process(&mut processing, &dataset, &templates);
 
         match best {
-            Some((entry, score, second, score2)) => {
-                println!("matches: {:?} ({}) | {:?} ({})", entry.path, score, second.path, score2);
+            Some(entries) => {
+                println!("matches: {:?} ({}) | {:?}", entries[0].0.path, entries[0].1, detected_set);
             }
             None => {}
         }

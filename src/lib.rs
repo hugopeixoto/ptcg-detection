@@ -5,11 +5,12 @@ use std::io::Write;
 use std::time::Instant;
 use rayon::prelude::*;
 
-mod sobel;
-mod hough;
-mod border;
-mod corners;
-mod perspective;
+pub mod sobel;
+pub mod hough;
+pub mod border;
+pub mod corners;
+pub mod perspective;
+pub mod set_symbol_detection;
 
 pub struct DatasetEntry {
     pub hash: img_hash::ImageHash,
@@ -153,6 +154,20 @@ pub fn load_or_build_dataset(dataset_path: &str, dataset_cache_filename: &str) -
     }
 }
 
+pub fn load_templates() -> Vec<(&'static str, f32, image::DynamicImage)> {
+    vec![
+        ("cpa",   0.20, image::open("cpa-template.png").unwrap()),
+        ("ssh",   0.10, image::open("ssh-template.png").unwrap()),
+        ("exp",   0.10, image::open("exp-template.png").unwrap()),
+        ("gen",   0.18, image::open("gen-template.png").unwrap()),
+        ("pls",   0.15, image::open("pls-template.png").unwrap()),
+        ("lc",    0.10, image::open("lc-template.png").unwrap()),
+        ("promo", 0.20, image::open("promo-template.png").unwrap()),
+        ("bst", 0.20, image::open("bst-template.png").unwrap()),
+    ]
+}
+
+
 pub trait Luma8 {
     fn get(&self, x: u32, y: u32) -> u8;
     fn width(&self) -> u32;
@@ -190,7 +205,11 @@ impl Luma8 for image::DynamicImage {
 }
 
 
-pub fn process<'a>(processing: &mut ProcessingPipeline, dataset: &'a Vec<DatasetEntry>) -> (ProcessingTimes, Option<(&'a DatasetEntry, u32, &'a DatasetEntry, u32)>) {
+pub fn process<'a>(
+    processing: &mut ProcessingPipeline,
+    dataset: &'a Vec<DatasetEntry>,
+    templates: &Vec<(&'a str, f32, image::DynamicImage)>,
+) -> (ProcessingTimes, Option<Vec<(&'a DatasetEntry, u32)>>, Option<&'a str>) {
     let mut times = ProcessingTimes::default();
 
     let width = processing.buffers.width;
@@ -216,7 +235,7 @@ pub fn process<'a>(processing: &mut ProcessingPipeline, dataset: &'a Vec<Dataset
 
     processing.buffers.perspective_image = image::DynamicImage::new_rgba8(734, 1024);
     if processing.buffers.corners.is_empty() {
-        return (times, None);
+        return (times, None, None);
     }
 
     let buffer = 5;
@@ -248,14 +267,41 @@ pub fn process<'a>(processing: &mut ProcessingPipeline, dataset: &'a Vec<Dataset
     let mut dataset_indexes = (0 .. dataset.len()).collect::<Vec<_>>();
     dataset_indexes.sort_by_key(|i| hash.dist(&dataset[*i].hash));
 
-    let best = dataset.iter().min_by_key(|entry| hash.dist(&entry.hash)).unwrap();
+    let detected_set = detect_set(&processing.buffers.perspective_image.grayscale(), templates);
 
     times.phash = time.elapsed();
 
-    (times, Some((
-                best,
-                hash.dist(&best.hash),
-                &dataset[dataset_indexes[1]],
-                hash.dist(&dataset[dataset_indexes[1]].hash),
-                )))
+    match detected_set {
+        Some(set) => {
+            dataset_indexes[0..3].sort_by_key(|i| if dataset[*i].path.to_str().unwrap().contains(set) { 0 } else { 1 });
+        },
+        None => {}
+    }
+
+
+    (
+        times,
+        Some(vec![
+            (&dataset[dataset_indexes[0]], hash.dist(&dataset[dataset_indexes[0]].hash)),
+            (&dataset[dataset_indexes[1]], hash.dist(&dataset[dataset_indexes[1]].hash)),
+            (&dataset[dataset_indexes[2]], hash.dist(&dataset[dataset_indexes[2]].hash)),
+        ]),
+        detected_set,
+    )
+}
+
+pub fn detect_set<'a>(image: &image::DynamicImage, templates: &Vec<(&'a str, f32, image::DynamicImage)>) -> Option<&'a str> {
+    templates
+        .par_iter()
+        .map(|t| {
+            let (score, img) = set_symbol_detection::detect(&image, &t.2, t.1);
+
+            if score != 1.0 {
+                (t, Some(score))
+            } else {
+                (t, None)
+            }
+        })
+        .find_first(|(_, m)| m.is_some())
+        .map(|(t, _)| t.0)
 }

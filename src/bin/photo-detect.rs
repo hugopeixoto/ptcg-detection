@@ -4,6 +4,7 @@ use image::GenericImage;
 
 fn main() {
     let dataset = load_or_build_dataset("dataset/", "dataset.txt");
+    let templates = load_templates();
 
     let width = 1920;
     let height = 1080;
@@ -38,7 +39,9 @@ fn main() {
         let time = Instant::now();
 
         println!("processing");
-        let (times, best) = process(&mut processing, &dataset);
+        let (times, best, detected_set) = process(&mut processing, &dataset, &templates);
+
+        println!("detected set: {:?}", detected_set);
 
         // println!("[{:?}] sobel", times.sobel);
         // println!("[{:?}] border", times.border);
@@ -53,7 +56,7 @@ fn main() {
     }
 }
 
-fn save_debug_images(processing: &ProcessingPipeline, stem: &str, best: Option<(&DatasetEntry, u32, &DatasetEntry, u32)>) {
+fn save_debug_images(processing: &ProcessingPipeline, stem: &str, best: Option<Vec<(&DatasetEntry, u32)>>) {
     let width = processing.buffers.width;
     let height = processing.buffers.height;
 
@@ -148,27 +151,19 @@ fn save_debug_images(processing: &ProcessingPipeline, stem: &str, best: Option<(
     processing.buffers.perspective_image.save(format!("outputs/{}.05-perspective.png", stem)).unwrap();
 
     match best {
-        Some((entry, score, second, score2)) => {
-            let file = std::fs::File::open(&entry.path).unwrap();
-            image::io::Reader::new(std::io::BufReader::new(file))
-                .with_guessed_format()
-                .unwrap()
-                .decode()
-                .unwrap()
-                .save(format!("outputs/{}.06-best.png", stem))
-                .unwrap();
+        Some(entries) => {
+            for (i, (entry, score)) in entries.iter().enumerate() {
+                let file = std::fs::File::open(&entry.path).unwrap();
+                image::io::Reader::new(std::io::BufReader::new(file))
+                    .with_guessed_format()
+                    .unwrap()
+                    .decode()
+                    .unwrap()
+                    .save(format!("outputs/{}.06-best-{}.png", stem, i))
+                    .unwrap();
 
-            let file = std::fs::File::open(&second.path).unwrap();
-            image::io::Reader::new(std::io::BufReader::new(file))
-                .with_guessed_format()
-                .unwrap()
-                .decode()
-                .unwrap()
-                .save(format!("outputs/{}.07-second.png", stem))
-                .unwrap();
-
-            println!("match1: {:?} ({})", entry.path, score);
-            println!("match2: {:?} ({})", second.path, score2);
+                println!("match{}: {:?} ({})", i, entry.path, score);
+            }
         },
         None => {},
     }
