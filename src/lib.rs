@@ -156,17 +156,16 @@ pub fn load_or_build_dataset(dataset_path: &str, dataset_cache_filename: &str) -
 
 pub fn load_templates() -> Vec<(&'static str, f32, image::DynamicImage)> {
     vec![
-        ("cpa",   0.20, image::open("cpa-template.png").unwrap()),
-        ("ssh",   0.10, image::open("ssh-template.png").unwrap()),
-        ("exp",   0.10, image::open("exp-template.png").unwrap()),
-        ("gen",   0.18, image::open("gen-template.png").unwrap()),
-        ("pls",   0.15, image::open("pls-template.png").unwrap()),
-        ("lc",    0.10, image::open("lc-template.png").unwrap()),
-        ("promo", 0.20, image::open("promo-template.png").unwrap()),
-        ("bst", 0.20, image::open("bst-template.png").unwrap()),
+        ("cpa",   0.20, image::open("templates/cpa.png").unwrap()),
+        ("ssh",   0.10, image::open("templates/ssh.png").unwrap()),
+        ("exp",   0.10, image::open("templates/exp.png").unwrap()),
+        ("gen",   0.18, image::open("templates/gen.png").unwrap()),
+        ("pls",   0.15, image::open("templates/pls.png").unwrap()),
+        ("lc",    0.10, image::open("templates/lc.png").unwrap()),
+        ("promo", 0.20, image::open("templates/promo.png").unwrap()),
+        ("bst",   0.20, image::open("templates/bst.png").unwrap()),
     ]
 }
-
 
 pub trait Luma8 {
     fn get(&self, x: u32, y: u32) -> u8;
@@ -240,7 +239,14 @@ pub fn process<'a>(
 
     let buffer = 5;
     let c = perspective::calculate(&processing.buffers.corners, 734.0 + buffer as f64 * 2.0, 1024.0 + buffer as f64 * 2.0);
+    if c.is_none() {
+        return (times, None, None);
+    }
 
+    let c = c.unwrap();
+
+    // TODO: I should build a grayscale image, no need for color.
+    // Less work down the line.
     for y in buffer..1024 + buffer {
         for x in buffer..734 + buffer {
             let p = c * nalgebra::Vector3::new(x as f64, y as f64, 1.0);
@@ -278,7 +284,6 @@ pub fn process<'a>(
         None => {}
     }
 
-
     (
         times,
         Some(vec![
@@ -297,11 +302,11 @@ pub fn detect_set<'a>(image: &image::DynamicImage, templates: &Vec<(&'a str, f32
             let (score, img) = set_symbol_detection::detect(&image, &t.2, t.1);
 
             if score != 1.0 {
-                (t, Some(score))
+                Some(t.0)
             } else {
-                (t, None)
+                None
             }
         })
-        .find_first(|(_, m)| m.is_some())
-        .map(|(t, _)| t.0)
+        .find_first(Option::is_some)
+        .flatten()
 }

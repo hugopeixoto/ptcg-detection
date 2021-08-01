@@ -1,4 +1,4 @@
-pub fn calculate(corners: &Vec<(f64, f64)>, width: f64, height: f64) -> nalgebra::Matrix3<f64> {
+pub fn calculate(corners: &Vec<(f64, f64)>, width: f64, height: f64) -> Option<nalgebra::Matrix3<f64>> {
     let a3 = nalgebra::Matrix3::new(
         corners[0].0, corners[1].0, corners[2].0,
         corners[0].1, corners[1].1, corners[2].1,
@@ -6,7 +6,7 @@ pub fn calculate(corners: &Vec<(f64, f64)>, width: f64, height: f64) -> nalgebra
     );
 
     let a1 = nalgebra::Vector3::new(corners[3].0, corners[3].1, 1.0);
-    let ax = a3.lu().solve(&a1).unwrap();
+    let ax = a3.lu().solve(&a1)?;
 
     let a = a3 * nalgebra::Matrix3::new(
         ax[0],   0.0,   0.0,
@@ -33,5 +33,7 @@ pub fn calculate(corners: &Vec<(f64, f64)>, width: f64, height: f64) -> nalgebra
           0.0,   0.0, bx[2],
     );
 
-    a * b.try_inverse().unwrap()
+    let inv_b = b.try_inverse()?;
+
+    Some(a * inv_b)
 }
