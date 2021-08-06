@@ -16,3 +16,5 @@ v4l = "0.12.1"
 rayon = "1.5.1"
 kmeans_colors = "0.4.0"
 imageproc = "0.22.0"
+iced = { version = "0.3.0", features = ["svg", "image"] }
+iced_futures = { version = "0.3.0", features = ["async-std"] }

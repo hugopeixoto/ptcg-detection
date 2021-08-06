@@ -87,6 +87,7 @@ fn save_debug_images(processing: &ProcessingPipeline, stem: &str, best: Option<V
     }
 
     let mut corners_img = processing.buffers.source_image.clone();
+    let mut all_lines_img = image::DynamicImage::new_luma8(width, height).to_luma8();
     let diagonal = ((width * width + height * height) as f64).sqrt().ceil();
     for a in 0..angles {
         for r_h in 0..rhos {
@@ -102,12 +103,14 @@ fn save_debug_images(processing: &ProcessingPipeline, stem: &str, best: Option<V
 
                     if 0.0 <= x && x < width as f64 && 0.0 <= y && y < height as f64 {
                         corners_img.put_pixel(x as u32, y as u32, image::Rgba([255, 0, 255, 255]));
+                        all_lines_img.put_pixel(x as u32, y as u32, image::Luma([255]));
                     }
                 }
             }
         }
     }
 
+    let mut lines_img = image::DynamicImage::new_luma8(width, height).to_luma8();
     for (a, r_h, _) in processing.buffers.lines.iter() {
         for d_abs in 0..=20 * diagonal as usize {
             let d = (d_abs as f64 / 10.0) - diagonal;
@@ -120,6 +123,7 @@ fn save_debug_images(processing: &ProcessingPipeline, stem: &str, best: Option<V
 
             if 0.0 <= x && x < width as f64 && 0.0 <= y && y < height as f64 {
                 corners_img.put_pixel(x as u32, y as u32, image::Rgba([0, 0, 255, 255]));
+                lines_img.put_pixel(x as u32, y as u32, image::Luma([255]));
             }
         }
     }
@@ -147,6 +151,8 @@ fn save_debug_images(processing: &ProcessingPipeline, stem: &str, best: Option<V
     sobel_img.save(format!("outputs/{}.01-sobel.png", stem)).unwrap();
     border_img.save(format!("outputs/{}.02-border.png", stem)).unwrap();
     hough_img.save(format!("outputs/{}.03-hough.png", stem)).unwrap();
+    all_lines_img.save(format!("outputs/{}.04-all-lines.png", stem)).unwrap();
+    lines_img.save(format!("outputs/{}.04-lines.png", stem)).unwrap();
     corners_img.save(format!("outputs/{}.04-corners.png", stem)).unwrap();
     processing.buffers.perspective_image.save(format!("outputs/{}.05-perspective.png", stem)).unwrap();
 

@@ -8,9 +8,11 @@ use rayon::prelude::*;
 pub mod sobel;
 pub mod hough;
 pub mod border;
+pub mod lines;
 pub mod corners;
 pub mod perspective;
 pub mod set_symbol_detection;
+pub mod viewer;
 
 pub struct DatasetEntry {
     pub hash: img_hash::ImageHash,
@@ -35,7 +37,7 @@ pub struct ProcessingPipeline<'a> {
 pub struct ProcessingBuffers {
     pub width: u32,
     pub height: u32,
-    pub sobel: Vec<u32>,
+    pub sobel: Vec<u8>,
     pub border: Vec<u32>,
     pub hough: Vec<u32>,
     pub lines: Vec<(f64, f64, usize)>,
@@ -164,23 +166,24 @@ pub fn load_templates() -> Vec<(&'static str, f32, image::DynamicImage)> {
         ("lc",    0.10, image::open("templates/lc.png").unwrap()),
         ("promo", 0.20, image::open("templates/promo.png").unwrap()),
         ("bst",   0.20, image::open("templates/bst.png").unwrap()),
+        ("sum",   0.10, image::open("templates/sum.png").unwrap()),
     ]
 }
 
-pub trait Luma8 {
-    fn get(&self, x: u32, y: u32) -> u8;
+pub trait Luma<T> {
+    fn get(&self, x: u32, y: u32) -> T;
     fn width(&self) -> u32;
     fn height(&self) -> u32;
 }
 
-struct YUYV442<'a> {
-    data: &'a [u8],
+struct YUYV442<'a, T> {
+    data: &'a [T],
     width: u32,
     height: u32,
 }
 
-impl<'a> Luma8 for YUYV442<'a> {
-    fn get(&self, x: u32, y: u32) -> u8 {
+impl<'a, T> Luma<T> for YUYV442<'a, T> where T: Copy {
+    fn get(&self, x: u32, y: u32) -> T {
         self.data[(y * self.width * 2 + x * 2) as usize]
     }
     fn width(&self) -> u32 {
@@ -191,7 +194,7 @@ impl<'a> Luma8 for YUYV442<'a> {
     }
 }
 
-impl Luma8 for image::DynamicImage {
+impl Luma<u8> for image::DynamicImage {
     fn get(&self, x: u32, y: u32) -> u8 {
         self.get_pixel(x, y)[0]
     }
@@ -203,6 +206,23 @@ impl Luma8 for image::DynamicImage {
     }
 }
 
+struct LumaVec<'a, T> {
+    data: &'a [T],
+    width: u32,
+    height: u32,
+}
+
+impl<'a, T> Luma<T> for LumaVec<'a, T> where T: Copy {
+    fn get(&self, x: u32, y: u32) -> T {
+        self.data[(y * self.width + x) as usize]
+    }
+    fn width(&self) -> u32 {
+        self.width
+    }
+    fn height(&self) -> u32 {
+        self.height
+    }
+}
 
 pub fn process<'a>(
     processing: &mut ProcessingPipeline,
@@ -219,7 +239,7 @@ pub fn process<'a>(
     times.sobel = time.elapsed();
     time = Instant::now();
 
-    border::calculate(&processing.buffers.sobel, width, height, &mut processing.buffers.border);
+    border::calculate(&LumaVec { data: &processing.buffers.sobel, width, height }, &mut processing.buffers.border);
     times.border = time.elapsed();
     time = Instant::now();
 
@@ -227,8 +247,8 @@ pub fn process<'a>(
     times.hough = time.elapsed();
     time = Instant::now();
 
-    // split into lines + corners?
-    corners::calculate(&processing.buffers.hough, width, height, &mut processing.buffers.lines, &mut processing.buffers.corners);
+    lines::calculate(&processing.buffers.hough, &mut processing.buffers.lines);
+    corners::calculate(&processing.buffers.lines, width, height, &mut processing.buffers.corners);
     times.corners = time.elapsed();
     time = Instant::now();
 
@@ -299,7 +319,7 @@ pub fn detect_set<'a>(image: &image::DynamicImage, templates: &Vec<(&'a str, f32
     templates
         .par_iter()
         .map(|t| {
-            let (score, img) = set_symbol_detection::detect(&image, &t.2, t.1);
+            let (score, _) = set_symbol_detection::detect(&image, &t.2, t.1);
 
             if score != 1.0 {
                 Some(t.0)
